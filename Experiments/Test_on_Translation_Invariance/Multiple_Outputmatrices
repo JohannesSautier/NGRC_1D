@@ -1,0 +1,340 @@
+import numpy as np 
+import pickle
+import matplotlib.pyplot as plt
+import multiprocessing as mp 
+from scipy.integrate import solve_ivp
+from sklearn.linear_model import Ridge
+import random 
+from multiprocessing import Pool
+from multiprocessing import set_start_method
+
+
+# 1.Set Parameters 
+
+input_dim=512
+number_of_groups= 64
+group_interaction= 8
+#number of time delay tabs 
+k=2
+groupsize= input_dim//number_of_groups
+#time to train the reservoirs (Its not possible to use 100.000 as a training time, because there is warmup time of 2 values)
+ltraining= 100000-k
+#lengh of the prediction, starting after the training period 
+pred_lengh_iterativ=400
+#Position of the element we take as a starting point for prediction out of the testing data 
+#testing_ic_indexes_number= 300
+#total time to train the reservoirs 
+
+#stepnumber 
+dt=0.25
+
+def addNoise(data, percent):
+        std_data = np.std(data, axis=0)
+        std_data = np.reshape(std_data, (1, -1))
+        std_data = np.repeat(std_data, np.shape(data)[0], axis=0)
+        noise = np.multiply(np.random.randn(*np.shape(data)), percent/1000.0*std_data)
+        data += noise
+        return data
+
+
+def callculate_wout (noise_level, ridge_param, groupnumber): 
+    
+    train_input_sequence_wout= train_input_sequence
+    
+    train_input_sequence_wout= train_input_sequence_wout.transpose()
+
+    
+    if groupnumber==0:
+        d = groupsize+(group_interaction*2)
+        lorenz_soln= np.zeros((d,ltraining + k))
+        lorenz_soln[0:group_interaction,:]= train_input_sequence_wout [groupsize*number_of_groups-group_interaction:groupsize*number_of_groups, : ]
+        lorenz_soln[group_interaction:groupsize+group_interaction+group_interaction,:]= train_input_sequence_wout [0:groupsize+group_interaction, : ] 
+        
+
+    elif groupnumber==number_of_groups-1:
+        d = groupsize+(group_interaction*2)
+        lorenz_soln= np.zeros((d,ltraining + k))
+        lorenz_soln[0:group_interaction+groupsize,:]= train_input_sequence_wout [(groupsize*groupnumber-group_interaction):groupsize*(groupnumber+1), : ]
+        lorenz_soln[groupsize+group_interaction:group_interaction+group_interaction+groupsize,:]= train_input_sequence_wout [0:group_interaction, : ]
+        
+    elif groupnumber>0 & groupnumber<number_of_groups-1:
+        d = groupsize+(group_interaction*2)
+        lorenz_soln= train_input_sequence_wout [(groupsize*groupnumber-group_interaction):(groupsize*(groupnumber+1))+group_interaction, : ]
+        
+
+    
+    dlin = k*d
+    dnonlin = int(dlin*(dlin+1)/2)
+    dtot = 1 + dlin + dnonlin
+    
+    # create an array to hold the linear part of the feature vector
+    x = np.zeros((dlin,ltraining + k))
+
+    # fill in the linear part of the feature vector for all times
+    for delay in range(k):
+        for j in range(delay,ltraining + k):
+            x[d*delay:d*(delay+1),j]=lorenz_soln[:,j-delay]
+
+    # create an array to hold the full feature vector for training time
+    # (use ones so the constant term is already 1)
+    out_train = np.ones((dtot,ltraining + k-k+1))
+
+    # copy over the linear part (shift over by one to account for constant)
+    out_train[1:dlin+1,:]=x[:,k-1:ltraining + k]
+
+    # fill in the non-linear part
+    cnt=0
+    for row in range(dlin):
+        for column in range(row,dlin):
+            # shift by one for constant
+            out_train[dlin+1+cnt]=x[row,k-1:ltraining + k]*x[column,k-1:ltraining + k]
+            cnt += 1
+
+    # Ridge Regression: Train W_out with maping the out_train to the group values without the group interaction dimensions 
+    # Find the target data of the Regression, Modelling 
+
+    if groupnumber==0:
+        # ridge regression: train W_out to map out_train to Lorenz[t] - Lorenz[t - 1]
+        ridge = Ridge(alpha=ridge_param, fit_intercept=False, copy_X=True, solver='auto')
+        H= out_train[:,0:-1]
+        Y= (x[group_interaction:d-group_interaction,k:ltraining + k]-x[group_interaction:d-group_interaction,k-1:ltraining + k-1])
+        H= H.transpose()
+        Y= Y.transpose()
+        ridge.fit(H, Y)
+        W_out = ridge.coef_
+        
+
+    elif groupnumber==number_of_groups-1:
+        # ridge regression: train W_out to map out_train to Lorenz[t] - Lorenz[t - 1]
+        ridge = Ridge(alpha=ridge_param, fit_intercept=False, copy_X=True, solver='auto')
+        H= out_train[:,:-1]
+        Y= (x[group_interaction:d-group_interaction,k:ltraining + k]-x[group_interaction:d-group_interaction,k-1:ltraining + k-1])
+        H= H.transpose()
+        Y= Y.transpose()
+        ridge.fit(H, Y)
+        W_out = ridge.coef_
+        
+    else:
+        # ridge regression: train W_out to map out_train to Lorenz[t] - Lorenz[t - 1]
+        ridge = Ridge(alpha=ridge_param, fit_intercept=False, copy_X=True, solver='auto')
+        H= out_train[:,:-1]
+        Y= (x[group_interaction:d-group_interaction,k:ltraining + k]-x[group_interaction:d-group_interaction,k-1:ltraining + k-1])
+        H= H.transpose()
+        Y= Y.transpose()
+        ridge.fit(H, Y)
+        W_out = ridge.coef_
+    print (groupnumber)  
+    return W_out
+
+def optimization(noise_level, ridge_param, ic_index):
+    global train_input_sequence
+
+    with open("Data/KuramotoSivashinskyGP512/Data/training_data_N100000.pickle", "rb") as file:
+        data = pickle.load(file)
+        train_input_sequence_1 = data["train_input_sequence"]
+        del data
+
+    train_input_sequence = addNoise(train_input_sequence_1, noise_level)
+
+    testing_ic_indexes_number= ic_index
+    with Pool() as pool:
+        args = [(noise_level, ridge_param, i) for i in range(number_of_groups)]
+        result= pool.starmap(callculate_wout, args)
+        
+    W_out_list= result
+
+    set_name= "Noise{},Ridge.para{},k{},Groups{},Interaction{},Pred_lengh{},ltraining{},ic_index{},Model Auto".format(noise_level, ridge_param,k,number_of_groups, group_interaction, pred_lengh_iterativ, ltraining,testing_ic_indexes_number)
+
+    #Import Data: 
+    
+
+    with open("Data/KuramotoSivashinskyGP512/Data/testing_data_N100000.pickle", "rb") as file:
+        data = pickle.load(file)
+        testing_ic_indexes = data["testing_ic_indexes"]
+        test_input_sequence = data["test_input_sequence"]
+        del data
+
+
+
+    #Callculate Parameters for scaling 
+    Data_mean = np.mean(train_input_sequence,0)
+    Data_std = np.std(train_input_sequence,0)
+
+    #Transpose the input sequence 
+    train_input_sequence= train_input_sequence.transpose()
+    test_input_sequence= test_input_sequence.transpose()
+
+
+    def prediction_1Iter_1Group(groupnumber,last_pred):
+
+        if groupnumber==0:
+            d = groupsize+(group_interaction*2)
+            lorenz_soln= np.zeros((d,k))
+            lorenz_soln[0:group_interaction,:]= last_pred [groupsize*number_of_groups-group_interaction:groupsize*number_of_groups, : ]
+            lorenz_soln[group_interaction:groupsize+group_interaction+group_interaction,:]= last_pred [0:groupsize+group_interaction, : ] 
+
+        elif groupnumber==number_of_groups-1:
+            d = groupsize+(group_interaction*2)
+            lorenz_soln= np.zeros((d,k))
+            lorenz_soln[0:group_interaction+groupsize,:]= last_pred [(groupsize*groupnumber-group_interaction):groupsize*(groupnumber+1), : ]
+            lorenz_soln[groupsize+group_interaction:group_interaction+group_interaction+groupsize,:]= last_pred [0:group_interaction, : ]
+
+        elif groupnumber>0 & groupnumber<number_of_groups-1:
+            d = groupsize+(group_interaction*2)
+            lorenz_soln= last_pred [(groupsize*groupnumber-group_interaction):(groupsize*(groupnumber+1))+group_interaction, : ]
+
+        # size of linear part of feature vector
+        dlin = k*d
+        # size of nonlinear part of feature vector
+        dnonlin = int(dlin*(dlin+1)/2)
+        # total size of feature vector: constant + linear + nonlinear
+        dtot = 1 + dlin + dnonlin
+        #Load the correct W_out 
+        W_out= W_out_list[groupnumber]
+        #Groupprediction 
+        pred_1Iter_1Group=np.zeros(groupsize)
+        
+        #Create Linear Feature Vector, to hold the startpoint of the callculation so that at the top there are the values for the parameters 
+        # at the 1000 Point and at the Bottom at the 999 Point 
+        # create an array to hold the linear part of the feature vector
+        x = np.zeros((dlin,k))
+        # fill in the linear part of the feature vector for all times
+        for delay in range(k):
+            for j in range(delay,k):
+                x[d*delay:d*(delay+1),j]=lorenz_soln[:,j-delay]
+
+
+        # create a place to store feature vector for prediction
+        out_test = np.zeros(dtot)              # full feature vector
+        x_test = np.zeros(dlin)                # linear part
+
+        # copy over initial linear feature vector
+        x_test[:] = x[:,k-1]
+
+        # do prediction
+        # copy linear part into whole feature vector
+        out_test[1:dlin+1]=x_test[:] # shift by one for constant
+        # fill in the non-linear part
+        cnt=0    
+        for row in range(dlin):
+            for column in range(row,dlin):
+            # shift by one for constant
+                out_test[dlin+1+cnt]=x_test[row]*x_test[column]
+                cnt +=1 
+        # do a prediction
+
+        if groupnumber==0:
+            pred_1Iter_1Group[:] = x_test[group_interaction:d-group_interaction]+ W_out @ out_test[:]
+        elif groupnumber==number_of_groups-1:
+            pred_1Iter_1Group[:] = x_test[group_interaction:d-group_interaction] + W_out @ out_test[:]
+        elif groupnumber>0 & groupnumber<number_of_groups-1:
+            pred_1Iter_1Group[:] = x_test[group_interaction:d-group_interaction] + W_out @ out_test[:]
+            
+        return pred_1Iter_1Group
+
+
+    def prediction_1Iteration(last_pred): 
+
+        #Define an Array to hold the prediction for one iteration step
+        prediction_1Iter= np.zeros(input_dim)
+
+        for i in range (number_of_groups):
+            prediction_1Iter[i*groupsize:(i+1)*groupsize]= prediction_1Iter_1Group(i,last_pred)
+
+        return prediction_1Iter
+
+
+    prediction= np.zeros((input_dim,pred_lengh_iterativ+k))
+
+    for h in range(k):
+        prediction[:,h]= test_input_sequence[:,testing_ic_indexes[testing_ic_indexes_number]+h]
+
+    for e in range(pred_lengh_iterativ):
+        last_pred=prediction[:,e:e+k]
+        prediction[:,k+e]= prediction_1Iteration(last_pred)
+
+
+    #Evaluation
+
+    def createContour_(fig, ax, data, title, fontsize, vmin, vmax, cmap, dt):
+        ax.set_title(title, fontsize=fontsize)
+        t, s = np.meshgrid(np.arange(data.shape[0])*dt, np.arange(data.shape[1]))
+        mp = ax.contourf(s, t, np.transpose(data), 15, cmap=cmap, levels=np.linspace(vmin, vmax, 60), extend="both")
+        fig.colorbar(mp, ax=ax)
+        ax.set_xlabel(r"$State$", fontsize=fontsize)
+        return mp
+
+
+    def createTestingContours(target, output, dt, set_name):
+        fontsize = 12
+        error = np.abs(target-output)
+        # vmin = np.array([target.min(), output.min()]).min()
+        # vmax = np.array([target.max(), output.max()]).max()
+        vmin = target.min()
+        vmax = target.max()
+        vmin_error = 0.0
+        vmax_error = target.max()
+
+        print("VMIN: {:} \nVMAX: {:} \n".format(vmin, vmax))
+
+        # Plotting the contour plot
+        fig, axes = plt.subplots(nrows=1, ncols=3,figsize=(12, 6), sharey=True)
+        fig.subplots_adjust(hspace=0.4, wspace = 0.4)
+        axes[0].set_ylabel(r"Time $t$", fontsize=fontsize)
+        createContour_(fig, axes[0], target, "Target", fontsize, vmin, vmax, plt.get_cmap("seismic"), dt)
+        createContour_(fig, axes[1], output, "Output", fontsize, vmin, vmax, plt.get_cmap("seismic"), dt)
+        createContour_(fig, axes[2], error, "Error", fontsize, vmin_error, vmax_error, plt.get_cmap("Reds"), dt)
+        fig_path = "Results" + "/prediction_{:}_contour.png".format(set_name)
+        plt.savefig(fig_path)
+        plt.close()
+
+
+    output= prediction[:,k:pred_lengh_iterativ+k+1]
+    output= output.transpose()
+    target= test_input_sequence[:,testing_ic_indexes[testing_ic_indexes_number]+k:testing_ic_indexes[testing_ic_indexes_number]+k+pred_lengh_iterativ]
+    target= target.transpose()
+
+    createTestingContours(target, output, dt, set_name)
+    
+    #Replace NaN
+    output[np.isnan(output)]=float('Inf')
+
+    #Calculate the NRSME Error
+    serror = np.square(target-output)
+    # NORMALIZED SQUARE ERROR
+    nserror = serror/np.square(Data_std)
+    # MEAN (over-space) NORMALIZED SQUARE ERROR
+    mnse = np.mean(nserror, axis=1)
+    # ROOT MEAN NORMALIZED SQUARE ERROR
+    rmnse = np.sqrt(mnse)
+   
+
+    return rmnse
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    
+    set_start_method("fork")
+    noise_level= 30
+    ridge_param= 0.0003
+
+    for i in range (10):
+            if i == 0:
+                y= optimization(noise_level,ridge_param, i)
+                y= np.expand_dims(y, axis=0)
+                
+
+            else:
+                y= np.append (y, np.expand_dims(optimization(noise_level,ridge_param, i), axis=0), axis = 0)
+
+            print (i)
+
+    #Callculate the mean values of the prediction 
+    y= np.mean(y, axis=0)
+
+    pickle.dump(y, open("Result_y_Model1,{:}.pkl".format(noise_level), "wb"))
