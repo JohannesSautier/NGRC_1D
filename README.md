@@ -21,6 +21,7 @@ The training and test datasets of the KS equation are generated using the code p
 4. Set up the virtual environment
 5. Run the main file
 6. The main file will predict the evolution of the KS equation, perform a specific experiment and print a graphical interpretation of the results:
+   
 ![prediction_Noise2 0961,Ridge para0 035098,k3,Groups512,Interaction25,Pred_lengh400,ltraining99997,ic_index3,Model Auto_contour](https://github.com/JohannesSautier/1D_NGRC/assets/114988239/6ef6cd8a-1c5c-42b8-8175-5a357fa62b78)
 
 
